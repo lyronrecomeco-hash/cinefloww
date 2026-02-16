@@ -70,11 +70,10 @@ const WatchPage = () => {
   const [selectedAudio, setSelectedAudio] = useState(audioParam || "");
   const [audioTypes, setAudioTypes] = useState<string[]>([]);
   const [currentProviderIdx, setCurrentProviderIdx] = useState(0);
-  const [playerLink, setPlayerLink] = useState<string | null>(null);
 
   const isMovie = type === "movie";
   const embedUrls = buildEmbedUrls(imdbId, id || "", type || "movie", season, episode);
-  const currentEmbedUrl = playerLink || embedUrls[currentProviderIdx] || embedUrls[0];
+  const currentEmbedUrl = embedUrls[currentProviderIdx] || embedUrls[0];
   // Only proxy embedplayapi.site - other providers load directly in iframe
   const needsProxy = currentEmbedUrl.includes("embedplayapi.site");
   const iframeSrc = needsProxy 
@@ -123,11 +122,7 @@ const WatchPage = () => {
         return;
       }
 
-      // Use player_link if available for better proxy fallback
-      if (data?.player_link) {
-        console.log(`[WatchPage] Got player link for proxy: ${data.player_link}`);
-        setPlayerLink(data.player_link);
-      }
+      // No direct URL found - go to embed fallback (MegaEmbed first)
     } catch {
       // Silent fail
     }
