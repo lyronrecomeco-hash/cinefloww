@@ -140,7 +140,10 @@ const ANTI_AD_CSS = `
 
 const ALLOWED_DOMAINS = [
   "embedplayapi.site",
-  "embed.su", "autoembed.co", "videasy.net",
+  "embed.su",
+  "vidlink.pro",
+  "vembed.stream", "vembed.online",
+  "autoembed.co", "videasy.net",
   "vidsrc.cc", "vidsrc.net", "vidsrc.xyz", "vidsrc.icu",
   "megaembed.com",
 ];
