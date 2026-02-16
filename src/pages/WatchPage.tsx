@@ -51,17 +51,20 @@ const WatchPage = () => {
       .eq("content_type", cType)
       .maybeSingle()
       .then(({ data }) => {
-        if (data?.audio_type?.length) setAudioTypes(data.audio_type);
-        else setAudioTypes(["legendado"]);
+        // Always show dublado + legendado at minimum
+        const dbTypes = data?.audio_type?.length ? data.audio_type : [];
+        const merged = new Set([...dbTypes, "dublado", "legendado"]);
+        setAudioTypes([...merged]);
       });
   }, [id, type]);
 
-  // Build SuperFlix URL
-  const contentId = imdbId || id || "";
+  // Build SuperFlix URL - movies use IMDB ID, series use TMDB ID
+  const movieId = imdbId || id || "";
+  const seriesId = id || "";
   const superflixUrl =
     type === "movie"
-      ? `https://superflixapi.one/filme/${contentId}`
-      : `https://superflixapi.one/serie/${contentId}/${season ?? 1}/${episode ?? 1}`;
+      ? `https://superflixapi.one/filme/${movieId}`
+      : `https://superflixapi.one/serie/${seriesId}/${season ?? 1}/${episode ?? 1}`;
 
   const proxyUrl = `${SUPABASE_URL}/functions/v1/proxy-player?url=${encodeURIComponent(superflixUrl)}`;
 
