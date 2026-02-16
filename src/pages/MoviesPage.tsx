@@ -1,10 +1,19 @@
+import { useEffect, useState } from "react";
 import Navbar from "@/components/Navbar";
 import MovieCard from "@/components/MovieCard";
-import { getMovies } from "@/data/movies";
+import { TMDBMovie, getPopularMovies } from "@/services/tmdb";
 import { Film } from "lucide-react";
 
 const MoviesPage = () => {
-  const allMovies = getMovies();
+  const [movies, setMovies] = useState<TMDBMovie[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    getPopularMovies().then((data) => {
+      setMovies(data.results);
+      setLoading(false);
+    });
+  }, []);
 
   return (
     <div className="min-h-screen bg-background">
@@ -16,11 +25,17 @@ const MoviesPage = () => {
           </div>
           <h1 className="font-display text-2xl lg:text-3xl font-bold">Filmes</h1>
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 lg:gap-6">
-          {allMovies.map((movie) => (
-            <MovieCard key={movie.id} movie={movie} />
-          ))}
-        </div>
+        {loading ? (
+          <div className="flex justify-center py-20">
+            <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 lg:gap-6">
+            {movies.map((movie) => (
+              <MovieCard key={movie.id} movie={movie} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

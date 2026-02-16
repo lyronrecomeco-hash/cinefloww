@@ -1,11 +1,11 @@
 import { useRef } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import MovieCard from "./MovieCard";
-import { Movie } from "@/data/movies";
+import { TMDBMovie } from "@/services/tmdb";
 
 interface ContentRowProps {
   title: string;
-  movies: Movie[];
+  movies: TMDBMovie[];
   icon?: React.ReactNode;
 }
 
@@ -25,7 +25,6 @@ const ContentRow = ({ title, movies, icon }: ContentRowProps) => {
 
   return (
     <section className="mb-10 lg:mb-14">
-      {/* Header */}
       <div className="flex items-center justify-between px-4 sm:px-6 lg:px-12 mb-4 lg:mb-6">
         <div className="flex items-center gap-3">
           {icon && (
@@ -51,7 +50,6 @@ const ContentRow = ({ title, movies, icon }: ContentRowProps) => {
         </div>
       </div>
 
-      {/* Scroll Row */}
       <div
         ref={scrollRef}
         className="flex gap-4 overflow-x-auto scrollbar-hide px-4 sm:px-6 lg:px-12 pb-2"
