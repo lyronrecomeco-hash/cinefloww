@@ -72,6 +72,7 @@ const PlayerModal = ({ tmdbId, imdbId, type, season, episode, title, onClose }: 
             src={playerUrl}
             className="absolute inset-0 w-full h-full"
             allowFullScreen
+            referrerPolicy="no-referrer"
             allow="autoplay; encrypted-media; picture-in-picture"
             title={title}
           />
