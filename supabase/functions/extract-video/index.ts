@@ -59,12 +59,12 @@ Deno.serve(async (req) => {
       });
     }
 
-    // 2. Build SuperFlix URL
-    const contentId = imdb_id || tmdb_id;
+    // 2. Build SuperFlix URL - movies use IMDB, series use TMDB
     const isMovie = cType === "movie";
+    const movieId = imdb_id || tmdb_id;
     const superflixUrl = isMovie
-      ? `https://superflixapi.one/filme/${contentId}`
-      : `https://superflixapi.one/serie/${contentId}/${season || 1}/${episode || 1}`;
+      ? `https://superflixapi.one/filme/${movieId}`
+      : `https://superflixapi.one/serie/${tmdb_id}/${season || 1}/${episode || 1}`;
 
     console.log(`[extract] Fetching: ${superflixUrl}`);
 
