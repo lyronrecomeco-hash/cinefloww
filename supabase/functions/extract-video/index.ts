@@ -21,106 +21,58 @@ function slugify(text: string): string {
     .replace(/-+/g, "-");
 }
 
-// ── CineVeo slug discovery ──────────────────────────────────────────
+// ── CineVeo slug discovery via full category API pagination ─────────
 async function findCineveoSlug(
   tmdbId: number,
   type: "movie" | "tv",
-  title?: string,
-  originalTitle?: string,
 ): Promise<string | null> {
-  const pathType = type === "movie" ? "filme" : "serie";
+  const cineveoType = type === "movie" ? "movie" : "tv";
+  const tmdbStr = String(tmdbId);
+  
+  // Paginate sequentially through ALL pages until found or exhausted
+  // CineVeo returns ~20 items per page. We'll check up to 500 pages (10k items).
+  // Use concurrent batches of 5 pages for speed.
+  const MAX_PAGES = 500;
+  const BATCH = 5;
 
-  // Method 1: Search by title via search.php
-  const titlesToSearch = [title, originalTitle].filter(Boolean) as string[];
-  for (const searchTitle of titlesToSearch) {
-    try {
-      const searchUrl = `https://cineveo.site/search.php?q=${encodeURIComponent(searchTitle)}`;
-      console.log(`[cineveo] Searching: ${searchUrl}`);
-      const res = await fetch(searchUrl, {
-        headers: { 
-          "User-Agent": UA, 
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-          "Referer": "https://cineveo.site/",
-          "Cookie": "mode=standard",
-        },
-      });
-      if (!res.ok) {
-        console.log(`[cineveo] Search returned ${res.status}`);
-        continue;
-      }
-      const html = await res.text();
-      console.log(`[cineveo] Search HTML: ${html.length} chars, has "${pathType}/": ${html.includes(`/${pathType}/`)}`);
-      
-      // Extract all slugs for the right content type
-      const slugRegex = new RegExp(`/${pathType}/([^"'\\s<>]+)\\.html`, "gi");
-      const slugMatches = [...html.matchAll(slugRegex)];
-      
-      if (slugMatches.length === 0) {
-        console.log(`[cineveo] No ${pathType} slugs found in search HTML`);
-        // Log a snippet around the first 500 chars of body for debugging
-        const bodyStart = html.indexOf('<body');
-        if (bodyStart > -1) {
-          const snippet = html.substring(bodyStart, bodyStart + 500);
-          console.log(`[cineveo] HTML snippet: ${snippet.substring(0, 300)}`);
-        }
-        continue;
-      }
+  for (let start = 1; start <= MAX_PAGES; start += BATCH) {
+    const fetches = Array.from({ length: BATCH }, (_, i) => {
+      const page = start + i;
+      return fetch(
+        `https://cineveo.site/category.php?fetch_mode=1&type=${cineveoType}&page=${page}&genre=`,
+        { headers: { "User-Agent": UA, Accept: "application/json, */*" } },
+      )
+        .then(async (res) => {
+          if (!res.ok) return null;
+          const data = await res.json();
+          if (!data.success || !Array.isArray(data.results)) return null;
+          if (data.results.length === 0) return { empty: true, page };
+          const found = data.results.find(
+            (item: any) => String(item.tmdb_id) === tmdbStr,
+          );
+          if (found?.slug) return { slug: found.slug, page };
+          return null;
+        })
+        .catch(() => null);
+    });
 
-      console.log(`[cineveo] Found ${slugMatches.length} ${pathType} slugs`);
-
-      // Check if tmdb_id appears in the page
-      const tmdbStr = String(tmdbId);
-      if (html.includes(tmdbStr)) {
-        // Find the slug closest to the tmdb_id mention
-        const tmdbPos = html.indexOf(tmdbStr);
-        let bestSlug = slugMatches[0][1];
-        let bestDist = Infinity;
-        for (const m of slugMatches) {
-          const pos = html.indexOf(m[0]);
-          const dist = Math.abs(pos - tmdbPos);
-          if (dist < bestDist) {
-            bestDist = dist;
-            bestSlug = m[1];
-          }
-        }
-        console.log(`[cineveo] Found slug via search: ${bestSlug}`);
-        return bestSlug;
+    const results = await Promise.all(fetches);
+    
+    for (const r of results) {
+      if (r && "slug" in r) {
+        console.log(`[cineveo] Found slug via API page ${r.page}: ${r.slug}`);
+        return r.slug;
       }
+    }
 
-      // If only one result and title matches, use it
-      if (slugMatches.length === 1) {
-        console.log(`[cineveo] Single slug found: ${slugMatches[0][1]}`);
-        return slugMatches[0][1];
-      }
-    } catch (err) {
-      console.log(`[cineveo] Search error: ${err}`);
+    // If any page returned empty results, we've reached the end of the catalog
+    if (results.some((r) => r && "empty" in r)) {
+      console.log(`[cineveo] Reached end of ${cineveoType} catalog at page ~${start}`);
+      break;
     }
   }
 
-  // Method 2: Paginate through category API  
-  const cineveoType = type === "movie" ? "movie" : "tv";
-  const pagesToTry = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200, 250, 300];
-
-  for (const page of pagesToTry) {
-    try {
-      const url = `https://cineveo.site/category.php?fetch_mode=1&type=${cineveoType}&page=${page}&genre=`;
-      const res = await fetch(url, {
-        headers: { "User-Agent": UA, Accept: "application/json, */*" },
-      });
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (!data.success || !Array.isArray(data.results)) continue;
-
-      const found = data.results.find(
-        (item: any) => String(item.tmdb_id) === String(tmdbId),
-      );
-      if (found?.slug) {
-        console.log(`[cineveo] Found slug via API page ${page}: ${found.slug}`);
-        return found.slug;
-      }
-    } catch { /* skip page */ }
-  }
+  console.log(`[cineveo] Slug not found for tmdb_id=${tmdbId} in ${cineveoType} catalog`);
   return null;
 }
 
@@ -163,7 +115,7 @@ async function tryCineveo(
 
   // 3. Discover correct slug via search + API
   console.log(`[cineveo] Slug-based attempts failed, trying discovery...`);
-  const discoveredSlug = await findCineveoSlug(tmdbId, tmdbType as "movie" | "tv", title, originalTitle || undefined);
+  const discoveredSlug = await findCineveoSlug(tmdbId, tmdbType as "movie" | "tv");
   if (discoveredSlug && !slugs.includes(discoveredSlug)) {
     console.log(`[cineveo] Trying discovered slug: ${discoveredSlug}`);
     const apiResult = await tryCineveoSlugs([discoveredSlug], pathType, isMovie, season, episode);
