@@ -57,24 +57,44 @@ async function fetchCineveoPage(
   return [];
 }
 
-// ── Get total pages from CineVeo HTML (first page only) ──────────────
+// ── Get total pages using binary search on JSON API ──────────────────
 async function getTotalPages(type: "movie" | "tv"): Promise<number> {
-  const url = `https://cineveo.site/category.php?type=${type}`;
-  const res = await fetch(url, {
-    headers: { "User-Agent": UA, Accept: "text/html,*/*" },
-  });
-  if (!res.ok) return 1;
-  const html = await res.text();
-
-  const pageMatches = [
-    ...html.matchAll(/class="pagination-btn[^"]*">(\d+)<\/button>/g),
-  ];
-  let maxPage = 1;
-  for (const m of pageMatches) {
-    const p = parseInt(m[1]);
-    if (p > maxPage) maxPage = p;
+  async function pageHasResults(page: number): Promise<boolean> {
+    const url = `https://cineveo.site/category.php?fetch_mode=1&type=${type}&page=${page}&genre=`;
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": UA, Accept: "application/json, */*" },
+      });
+      if (!res.ok) return false;
+      const text = await res.text();
+      const data = JSON.parse(text);
+      return data.success && Array.isArray(data.results) && data.results.length > 0;
+    } catch {
+      return false;
+    }
   }
-  return maxPage;
+
+  // Find upper bound by doubling
+  let low = 1;
+  let high = 100;
+  while (await pageHasResults(high)) {
+    low = high;
+    high *= 2;
+    if (high > 5000) break;
+  }
+
+  // Binary search between low and high
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (await pageHasResults(mid)) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  console.log(`[cineveo] Total pages for ${type}: ${low}`);
+  return low;
 }
 
 // ── Fetch TMDB details for enrichment ────────────────────────────────
@@ -141,25 +161,26 @@ Deno.serve(async (req) => {
 
     // Get total pages
     const totalAvailable = await getTotalPages(cineveoType);
-    const endPage = Math.min(startPage + maxPages - 1, totalAvailable);
+    const endPage = startPage + maxPages - 1;
+    const effectiveEnd = Math.min(endPage, totalAvailable);
     console.log(
-      `[import] CineVeo ${cineveoType} pages ${startPage}-${endPage} (total: ${totalAvailable})`,
+      `[import] CineVeo ${cineveoType} pages ${startPage}-${effectiveEnd} (total: ${totalAvailable})`,
     );
 
-    // Fetch all pages via JSON API
+    // Fetch pages via JSON API
     const allItems: CineveoItem[] = [];
     const seenIds = new Set<string>();
 
-    for (let p = startPage; p <= endPage; p++) {
+    for (let p = startPage; p <= effectiveEnd; p++) {
       const items = await fetchCineveoPage(cineveoType, p);
+      if (items.length === 0) break; // No more results
       for (const item of items) {
         if (!seenIds.has(item.tmdb_id)) {
           seenIds.add(item.tmdb_id);
           allItems.push(item);
         }
       }
-      // Small delay to avoid hammering
-      if (p < endPage) await new Promise((r) => setTimeout(r, 100));
+      if (p < effectiveEnd) await new Promise((r) => setTimeout(r, 100));
     }
 
     console.log(`[import] Total unique items: ${allItems.length}`);
