@@ -66,7 +66,7 @@ const AudioSelectModal = ({ tmdbId, type, title, subtitle, onSelect, onClose }: 
                 return (
                   <button
                     key={opt.key}
-                    onClick={() => onSelect(opt.key)}
+                    onClick={() => { localStorage.setItem("cineflow_audio_pref", opt.key); onSelect(opt.key); }}
                     className="w-full flex items-center gap-4 p-4 rounded-2xl bg-white/[0.03] border border-white/10 hover:bg-white/[0.08] hover:border-primary/30 transition-all duration-200 group"
                   >
                     <div className="w-12 h-12 rounded-xl bg-primary/15 flex items-center justify-center flex-shrink-0 group-hover:bg-primary/25 transition-colors">
@@ -84,7 +84,7 @@ const AudioSelectModal = ({ tmdbId, type, title, subtitle, onSelect, onClose }: 
 
             <div className="mt-5 pt-5 border-t border-white/10">
               <button
-                onClick={() => onSelect("legendado")}
+                onClick={() => { localStorage.setItem("cineflow_audio_pref", "legendado"); onSelect("legendado"); }}
                 className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-white/5 border border-white/10 text-sm font-medium text-muted-foreground hover:bg-white/10 transition-colors"
               >
                 <Globe className="w-4 h-4" /> Pular e assistir legendado

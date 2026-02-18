@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useParams, useSearchParams, useNavigate } from "react-router-dom";
+import { useParams, useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { ArrowLeft, Mic, Subtitles, Video, Globe, ChevronRight, Loader2, AlertTriangle } from "lucide-react";
 import CustomPlayer from "@/components/CustomPlayer";
@@ -25,6 +25,7 @@ const WatchPage = () => {
   const { type, id } = useParams<{ type: string; id: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const title = searchParams.get("title") || "Carregando...";
   const imdbId = searchParams.get("imdb") || null;
@@ -32,9 +33,22 @@ const WatchPage = () => {
   const season = searchParams.get("s") ? Number(searchParams.get("s")) : undefined;
   const episode = searchParams.get("e") ? Number(searchParams.get("e")) : undefined;
 
-  const [sources, setSources] = useState<VideoSource[]>([]);
+  // Check if we have a prefetched source from DetailsPage
+  const prefetched = (location.state as any)?.prefetchedSource;
+
+  const [sources, setSources] = useState<VideoSource[]>(() => {
+    if (prefetched?.url) {
+      return [{
+        url: prefetched.url,
+        quality: "auto",
+        provider: prefetched.provider || "banco",
+        type: (prefetched.type === "mp4" ? "mp4" : "m3u8") as "mp4" | "m3u8",
+      }];
+    }
+    return [];
+  });
   const [phase, setPhase] = useState<Phase>(
-    audioParam ? "loading" : "audio-select"
+    prefetched?.url ? "playing" : (audioParam ? "loading" : "audio-select")
   );
   const [iframeProxyUrl, setIframeProxyUrl] = useState<string | null>(null);
   const [selectedAudio, setSelectedAudio] = useState(audioParam || "");
@@ -168,6 +182,7 @@ const WatchPage = () => {
   };
 
   const handleAudioSelect = (audio: string) => {
+    localStorage.setItem("cineflow_audio_pref", audio);
     setSelectedAudio(audio);
     setPhase("loading");
   };
