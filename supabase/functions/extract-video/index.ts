@@ -349,7 +349,7 @@ async function tryMegaEmbed(
   return null;
 }
 
-// ── EmbedPlay extraction ─────────────────────────────────────────────
+// ── EmbedPlay API extraction (embedplayapi.site only) ────────────────
 async function tryEmbedPlay(
   tmdbId: number,
   imdbId: string | null,
@@ -357,70 +357,99 @@ async function tryEmbedPlay(
   s: number,
   e: number,
 ): Promise<{ url: string; type: "mp4" | "m3u8" } | null> {
+  // Build embed URL using the embedplayapi.site API
   const embedId = imdbId || tmdbId;
-  const embedPageUrl = isMovie
+  const embedUrl = isMovie
     ? `https://embedplayapi.site/embed/${embedId}`
     : `https://embedplayapi.site/embed/${embedId}/${s}/${e}`;
-  console.log(`[src-c] Trying fallback`);
+  console.log(`[src-c] Fetching embed page`);
 
   try {
-    const pageRes = await fetch(embedPageUrl, {
+    const pageRes = await fetch(embedUrl, {
       headers: { "User-Agent": UA, "Referer": "https://embedplayapi.site/" },
       redirect: "follow",
     });
-    if (!pageRes.ok) return null;
+    if (!pageRes.ok) {
+      console.log(`[src-c] Embed page returned ${pageRes.status}`);
+      return null;
+    }
 
     const html = await pageRes.text();
+
+    // Try to find movie internal ID for server-based extraction
     const movieIdMatch = html.match(/data-movie-id="([^"]+)"/);
     const movieId = movieIdMatch?.[1];
-    if (!movieId) return null;
 
-    const serverMatches = [...html.matchAll(/class="server[^"]*"\s+data-id="([^"]+)"/g)];
-    for (const [, serverId] of serverMatches) {
-      try {
-        const apiUrl = `https://embedplayapi.site/ajax/get_stream_link?id=${serverId}&movie=${movieId}&is_init=false&captcha=&ref=`;
-        const apiRes = await fetch(apiUrl, {
-          headers: { "User-Agent": UA, "Referer": embedPageUrl, "X-Requested-With": "XMLHttpRequest" },
-        });
-        if (!apiRes.ok) continue;
-        const ct = apiRes.headers.get("content-type") || "";
-        if (!ct.includes("json")) continue;
+    if (movieId) {
+      // Get available servers and try each one
+      const serverMatches = [...html.matchAll(/class="server[^"]*"\s+data-id="([^"]+)"/g)];
+      for (const [, serverId] of serverMatches) {
+        try {
+          const apiUrl = `https://embedplayapi.site/ajax/get_stream_link?id=${serverId}&movie=${movieId}&is_init=false&captcha=&ref=`;
+          const apiRes = await fetch(apiUrl, {
+            headers: { "User-Agent": UA, "Referer": embedUrl, "X-Requested-With": "XMLHttpRequest" },
+          });
+          if (!apiRes.ok) continue;
+          const ct = apiRes.headers.get("content-type") || "";
+          if (!ct.includes("json")) continue;
 
-        const apiData = await apiRes.json();
-        if (!apiData.success || !apiData.data?.link) continue;
+          const apiData = await apiRes.json();
+          if (!apiData.success || !apiData.data?.link) continue;
 
-        const playerRes = await fetch(apiData.data.link, {
-          headers: { "User-Agent": UA, "Referer": "https://embedplayapi.site/" },
-          redirect: "follow",
-        });
-        if (!playerRes.ok) continue;
-        const playerHtml = await playerRes.text();
+          console.log(`[src-c] Got stream link from server ${serverId}`);
+          const playerRes = await fetch(apiData.data.link, {
+            headers: { "User-Agent": UA, "Referer": "https://embedplayapi.site/" },
+            redirect: "follow",
+          });
+          if (!playerRes.ok) continue;
+          const playerHtml = await playerRes.text();
 
-        const srcMatch = playerHtml.match(/var\s+sources\s*=\s*(\[[\s\S]*?\]);/);
-        if (srcMatch?.[1]) {
-          try {
-            const srcs = JSON.parse(srcMatch[1]);
-            for (const src of srcs) {
-              if (src.file && src.type !== "iframe") {
-                return { url: src.file, type: (src.file as string).includes(".mp4") ? "mp4" : "m3u8" };
+          // Try var sources = [...] pattern
+          const srcMatch = playerHtml.match(/var\s+sources\s*=\s*(\[[\s\S]*?\]);/);
+          if (srcMatch?.[1]) {
+            try {
+              const srcs = JSON.parse(srcMatch[1]);
+              for (const src of srcs) {
+                if (src.file && src.type !== "iframe") {
+                  console.log(`[src-c] Found video via sources array`);
+                  return { url: src.file, type: (src.file as string).includes(".mp4") ? "mp4" : "m3u8" };
+                }
               }
-            }
-          } catch { /* skip */ }
-        }
-
-        const patterns = [
-          /["'](https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/gi,
-          /["'](https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/gi,
-        ];
-        for (const pattern of patterns) {
-          pattern.lastIndex = 0;
-          const m = pattern.exec(playerHtml);
-          if (m?.[1]) {
-            return { url: m[1], type: m[1].includes(".mp4") ? "mp4" : "m3u8" };
+            } catch { /* skip */ }
           }
-        }
-      } catch { /* skip server */ }
+
+          // Fallback: regex for direct video URLs
+          const videoPatterns = [
+            /["'](https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/gi,
+            /["'](https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/gi,
+          ];
+          for (const pattern of videoPatterns) {
+            pattern.lastIndex = 0;
+            const m = pattern.exec(playerHtml);
+            if (m?.[1] && !m[1].includes("googletagmanager")) {
+              console.log(`[src-c] Found video via regex`);
+              return { url: m[1], type: m[1].includes(".mp4") ? "mp4" : "m3u8" };
+            }
+          }
+        } catch { /* skip server */ }
+      }
     }
+
+    // Direct fallback: look for video URLs in the embed page itself
+    const directPatterns = [
+      /["'](https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/gi,
+      /["'](https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/gi,
+    ];
+    for (const pattern of directPatterns) {
+      pattern.lastIndex = 0;
+      const m = pattern.exec(html);
+      if (m?.[1] && !m[1].includes("googletagmanager") && !m[1].includes("cdn.vidstack")) {
+        console.log(`[src-c] Found video directly in embed page`);
+        return { url: m[1], type: m[1].includes(".mp4") ? "mp4" : "m3u8" };
+      }
+    }
+
+    console.log(`[src-c] No video found in embed response`);
   } catch (err) {
     console.log(`[src-c] Error: ${err}`);
   }
