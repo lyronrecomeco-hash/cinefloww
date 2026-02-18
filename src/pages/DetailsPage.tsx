@@ -74,14 +74,46 @@ const DetailsPage = ({ type }: DetailsPageProps) => {
   const trailer = detail.videos?.results.find((v) => v.type === "Trailer" && v.site === "YouTube");
 
   const handleWatchClick = () => {
+    // If user has a saved audio preference, skip the modal entirely
+    const savedPref = localStorage.getItem("cineflow_audio_pref");
+    if (savedPref) {
+      handleAudioSelect(savedPref);
+      return;
+    }
     setShowAudioModal(true);
   };
 
-  const handleAudioSelect = (audio: string) => {
+  // Prefetch video source for faster playback
+  const prefetchSource = async (audio: string) => {
+    const cType = type === "movie" ? "movie" : "series";
+    try {
+      const { data } = await supabase
+        .from("video_cache")
+        .select("video_url, video_type, provider")
+        .eq("tmdb_id", Number(id))
+        .eq("content_type", cType)
+        .eq("audio_type", audio)
+        .is("season", null)
+        .is("episode", null)
+        .gt("expires_at", new Date().toISOString())
+        .maybeSingle();
+      if (data?.video_url) {
+        return { url: data.video_url, type: data.video_type, provider: data.provider };
+      }
+    } catch {}
+    return null;
+  };
+
+  const handleAudioSelect = async (audio: string) => {
     setShowAudioModal(false);
     const params = new URLSearchParams({ title: getDisplayTitle(detail), audio });
     if (imdbId) params.set("imdb", imdbId);
-    navigate(`/player/${type === "tv" ? "series" : "movie"}/${id}?${params.toString()}`);
+    
+    // Try to prefetch cached source for instant playback
+    const cached = await prefetchSource(audio);
+    navigate(`/player/${type === "tv" ? "series" : "movie"}/${id}?${params.toString()}`, {
+      state: cached ? { prefetchedSource: cached } : undefined,
+    });
   };
 
   return (
