@@ -102,7 +102,7 @@ const PlayerPage = () => {
 
   const isLiveTV = !!tvChannelId;
 
-  // TV channel extraction — no secureVideoUrl for live streams (direct m3u8)
+  // TV channel extraction — proxy through secureVideoUrl to convert HTTP→HTTPS
   useEffect(() => {
     if (!tvChannelId) return;
     setBankLoading(true);
@@ -113,11 +113,13 @@ const PlayerPage = () => {
           body: { channel_id: tvChannelId },
         });
         if (cancelled) return;
-        // Set title from channel name returned by extract-tv
         if (data?.channel_name) setBankTitle(data.channel_name);
         if (data?.url && data.type !== "iframe") {
+          // Always proxy through video-token to convert HTTP→HTTPS
+          const securedUrl = await secureVideoUrl(data.url);
+          if (cancelled) return;
           setBankSources([{
-            url: data.url,
+            url: securedUrl,
             quality: "live",
             provider: data.provider || "tv",
             type: data.type === "mp4" ? "mp4" : "m3u8",
