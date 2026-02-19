@@ -11,7 +11,7 @@ import Index from "./pages/Index";
 const DetailsPage = lazy(() => import("./pages/DetailsPage"));
 const MoviesPage = lazy(() => import("./pages/MoviesPage"));
 const SeriesPage = lazy(() => import("./pages/SeriesPage"));
-const TVPage = lazy(() => import("./pages/TVPage"));
+// TV Lyne removed
 const ReleasesPage = lazy(() => import("./pages/ReleasesPage"));
 const PlayerPage = lazy(() => import("./pages/PlayerPage"));
 const ApiRedirect = lazy(() => import("./pages/ApiRedirect"));
@@ -35,7 +35,7 @@ const LogsPage = lazy(() => import("./pages/admin/LogsPage"));
 const SecurityMonitor = lazy(() => import("./pages/admin/SecurityMonitor"));
 const TelegramPage = lazy(() => import("./pages/admin/TelegramPage"));
 const ReportsPage = lazy(() => import("./pages/admin/ReportsPage"));
-const TVManager = lazy(() => import("./pages/admin/TVManager"));
+// TVManager removed
 
 
 const queryClient = new QueryClient({
@@ -68,14 +68,14 @@ const App = () => (
             <Route path="/" element={<Index />} />
             <Route path="/filmes" element={<MoviesPage />} />
             <Route path="/series" element={<SeriesPage />} />
-            <Route path="/tv" element={<TVPage />} />
+            
             <Route path="/lancamentos" element={<ReleasesPage />} />
             <Route path="/filme/:id" element={<DetailsPage type="movie" />} />
             <Route path="/serie/:id" element={<DetailsPage type="tv" />} />
             <Route path="/assistir/:type/:id" element={<ApiRedirect />} />
             <Route path="/player" element={<PlayerPage />} />
             <Route path="/player/:type/:id" element={<PlayerPage />} />
-            <Route path="/tv/:channelId" element={<PlayerPage />} />
+            {/* TV routes removed */}
             <Route path="/dmca" element={<DmcaPage />} />
             <Route path="/termos" element={<TermsPage />} />
             <Route path="/dados" element={<DadosPage />} />
@@ -95,7 +95,7 @@ const App = () => (
               <Route path="pedidos" element={<RequestsPage />} />
               <Route path="banco" element={<BancoPage />} />
               <Route path="reports" element={<ReportsPage />} />
-              <Route path="tv" element={<TVManager />} />
+              {/* TV manager removed */}
               <Route path="cineveo" element={<CineveoTester />} />
               <Route path="logs" element={<LogsPage />} />
               <Route path="seguranca" element={<SecurityMonitor />} />
