@@ -103,14 +103,14 @@ const PlayerPage = () => {
   const isLiveTV = !!tvChannelId;
   const [tvIframeUrl, setTvIframeUrl] = useState<string | null>(null);
 
-  // TV channel — use iframe embed directly (CloudFront CDN blocks direct m3u8 access)
+  // TV channel — fetch proxied HTML and render via blob URL to bypass sandbox detection
   useEffect(() => {
     if (!tvChannelId) return;
     setBankLoading(true);
     let cancelled = false;
+    let blobUrl: string | null = null;
     const load = async () => {
       try {
-        // Get channel info from DB
         const { data: channel } = await supabase
           .from("tv_channels")
           .select("name, stream_url")
@@ -122,8 +122,20 @@ const PlayerPage = () => {
         
         if (channel) {
           setBankTitle(channel.name);
-          // Use the embed URL directly in an iframe — CDN blocks direct m3u8 access
-          setTvIframeUrl(channel.stream_url);
+          // Fetch cleaned HTML from proxy-tv edge function
+          const resp = await supabase.functions.invoke("proxy-tv", {
+            body: { url: channel.stream_url },
+          });
+          if (cancelled) return;
+          if (resp.data?.html) {
+            // Create blob URL so iframe loads from same origin, bypassing CSP
+            const blob = new Blob([resp.data.html], { type: "text/html" });
+            blobUrl = URL.createObjectURL(blob);
+            setTvIframeUrl(blobUrl);
+          } else {
+            // Fallback: direct embed URL
+            setTvIframeUrl(channel.stream_url);
+          }
         }
       } catch (err) {
         console.error("[TV] Error loading channel:", err);
@@ -131,7 +143,7 @@ const PlayerPage = () => {
       if (!cancelled) setBankLoading(false);
     };
     load();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; if (blobUrl) URL.revokeObjectURL(blobUrl); };
   }, [tvChannelId]);
 
   const sources: VideoSource[] = useMemo(() => {
@@ -535,11 +547,12 @@ const PlayerPage = () => {
       }}
       style={{ cursor: showControls ? "default" : "none" }}>
       
-      {/* Live TV uses iframe embed (CDN blocks direct m3u8) */}
+      {/* Live TV uses proxied iframe (sandbox detection stripped server-side) */}
       {isLiveTV && tvIframeUrl ? (
         <iframe
           src={tvIframeUrl}
           className="w-full h-full border-0"
+          sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-presentation"
           allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
           allowFullScreen
           referrerPolicy="no-referrer"
