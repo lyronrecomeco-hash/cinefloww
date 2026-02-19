@@ -9,7 +9,6 @@ const navItems = [
   { label: "Início", path: "/" },
   { label: "Filmes", path: "/filmes" },
   { label: "Séries", path: "/series" },
-  { label: "TV LYNE", path: "/tv" },
   { label: "Lançamentos", path: "/lancamentos" },
 ];
 

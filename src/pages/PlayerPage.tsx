@@ -3,13 +3,15 @@ import { useSearchParams, useNavigate, useParams } from "react-router-dom";
 import Hls from "hls.js";
 import { supabase } from "@/integrations/supabase/client";
 import { fromSlug } from "@/lib/slugify";
+import { toSlug } from "@/lib/slugify";
 import {
   Play, Pause, Volume2, VolumeX, Maximize, Minimize,
   SkipForward, SkipBack, Settings, AlertTriangle,
-  RefreshCw, ChevronRight, ArrowLeft, PictureInPicture,
+  RefreshCw, ArrowLeft, PictureInPicture,
 } from "lucide-react";
 import { saveWatchProgress, getWatchProgress } from "@/lib/watchProgress";
 import { secureVideoUrl } from "@/lib/videoUrl";
+import { getSeasonDetails } from "@/services/tmdb";
 
 interface VideoSource {
   url: string;
@@ -29,12 +31,10 @@ const formatTime = (s: number) => {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 };
 
-// No demo sources - show branded loading/error instead
-
 const PlayerPage = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const params = useParams<{ type?: string; id?: string; channelId?: string }>();
+  const params = useParams<{ type?: string; id?: string }>();
 
   const title = searchParams.get("title") || "LyneFlix Player";
   const subtitle = searchParams.get("subtitle") || undefined;
@@ -46,103 +46,75 @@ const PlayerPage = () => {
   const contentType = params.type || searchParams.get("ct") || "movie";
   const season = searchParams.get("s") ? Number(searchParams.get("s")) : undefined;
   const episode = searchParams.get("e") ? Number(searchParams.get("e")) : undefined;
-  const nextEpUrl = searchParams.get("next") || null;
-  const tvChannelId = params.channelId || searchParams.get("tv") || null;
 
   const [bankSources, setBankSources] = useState<VideoSource[]>([]);
   const [bankLoading, setBankLoading] = useState(false);
   const [bankTitle, setBankTitle] = useState(title);
 
-  // If accessed via /player/:type/:id, resolve video via extract-video edge function
+  // Next episode state
+  const [nextEpUrl, setNextEpUrl] = useState<string | null>(null);
+  const [showNextEp, setShowNextEp] = useState(false);
+  const nextEpTimerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // Compute next episode URL
+  useEffect(() => {
+    if (!tmdbId || !season || !episode || contentType === "movie") {
+      setNextEpUrl(null);
+      return;
+    }
+    let cancelled = false;
+    getSeasonDetails(tmdbId, season).then((seasonData) => {
+      if (cancelled) return;
+      const nextEp = seasonData.episodes.find(e => e.episode_number === episode + 1);
+      if (nextEp) {
+        const slug = params.id || toSlug(bankTitle, tmdbId);
+        const p = new URLSearchParams({ title: bankTitle, audio: audioParam, s: String(season), e: String(nextEp.episode_number) });
+        if (imdbId) p.set("imdb", imdbId);
+        setNextEpUrl(`/player/${contentType}/${slug}?${p.toString()}`);
+      } else {
+        setNextEpUrl(null);
+      }
+    }).catch(() => { if (!cancelled) setNextEpUrl(null); });
+    return () => { cancelled = true; };
+  }, [tmdbId, season, episode, contentType, bankTitle, audioParam, imdbId, params.id]);
+
+  // Resolve video via extract-video edge function
+  const extractionRef = useRef<string | null>(null);
   useEffect(() => {
     if (!params.id || !params.type) return;
+    const key = `${params.type}-${params.id}-${audioParam}-${season}-${episode}`;
+    if (extractionRef.current === key) return; // Prevent double extraction
+    extractionRef.current = key;
     setBankLoading(true);
-    const controller = new AbortController();
+    setBankSources([]);
+
     const load = async () => {
       const cType = params.type === "movie" ? "movie" : "series";
       const aType = audioParam || "legendado";
 
-      // Fetch title in parallel with video extraction
-      const titlePromise = supabase.from("content").select("title").eq("tmdb_id", tmdbId!).eq("content_type", cType).maybeSingle();
-
-      // Always use extract-video (server-side) — it checks cache internally
-      // This prevents video_url from ever reaching the frontend directly
-      const extractPromise = supabase.functions.invoke("extract-video", {
-        body: {
-          tmdb_id: tmdbId!,
-          imdb_id: imdbId,
-          content_type: cType,
-          audio_type: aType,
-          season,
-          episode,
-        },
-      });
-
-      const [titleResult, extractResult] = await Promise.all([titlePromise, extractPromise]);
+      const [titleResult, extractResult] = await Promise.all([
+        supabase.from("content").select("title").eq("tmdb_id", tmdbId!).eq("content_type", cType).maybeSingle(),
+        supabase.functions.invoke("extract-video", {
+          body: { tmdb_id: tmdbId!, imdb_id: imdbId, content_type: cType, audio_type: aType, season, episode },
+        }),
+      ]);
       
       if (titleResult.data?.title) setBankTitle(titleResult.data.title);
 
       const data = extractResult.data;
       if (data?.url) {
+        const signedUrl = await secureVideoUrl(data.url);
         setBankSources([{
-          url: await secureVideoUrl(data.url),
+          url: signedUrl,
           quality: "auto",
           provider: data.provider || "cache",
           type: data.type === "mp4" ? "mp4" : "m3u8",
         }]);
       }
-
-      // extract-video already handles cache + fallback server-side
-
       setBankLoading(false);
     };
-    load();
-    return () => controller.abort();
-  }, [params.id, params.type, audioParam, imdbId, season, episode]);
-
-  const isLiveTV = !!tvChannelId;
-  const [tvHtml, setTvHtml] = useState<string | null>(null);
-  const [tvIframeUrl, setTvIframeUrl] = useState<string | null>(null);
-
-  // TV channel — fetch proxied HTML and render via srcdoc
-  useEffect(() => {
-    if (!tvChannelId) return;
-    setBankLoading(true);
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const { data: channel } = await supabase
-          .from("tv_channels")
-          .select("name, stream_url")
-          .eq("id", tvChannelId)
-          .eq("active", true)
-          .single();
-        
-        if (cancelled) return;
-        
-        if (channel) {
-          setBankTitle(channel.name);
-          // Fetch cleaned HTML from proxy-tv edge function
-          const resp = await supabase.functions.invoke("proxy-tv", {
-            body: { url: channel.stream_url },
-          });
-          if (cancelled) return;
-          if (resp.data?.html) {
-            setTvHtml(resp.data.html);
-          } else {
-            // Fallback: use stream_url directly as iframe src
-            setTvHtml(null);
-            setTvIframeUrl(channel.stream_url);
-          }
-        }
-      } catch (err) {
-        console.error("[TV] Error loading channel:", err);
-      }
-      if (!cancelled) setBankLoading(false);
-    };
-    load();
-    return () => { cancelled = true; };
-  }, [tvChannelId]);
+    load().catch(() => setBankLoading(false));
+  }, [params.id, params.type, audioParam, imdbId, season, episode, tmdbId]);
 
   const sources: VideoSource[] = useMemo(() => {
     if (bankSources.length > 0) return bankSources;
@@ -188,17 +160,16 @@ const PlayerPage = () => {
     }
   }, [isMobile]);
 
-  // Save progress periodically (skip for live TV)
+  // Save progress periodically
   useEffect(() => {
-    if (!tmdbId || isLiveTV) return;
+    if (!tmdbId) return;
     progressSaveTimer.current = setInterval(() => {
       const v = videoRef.current;
       if (v && v.currentTime > 5 && v.duration > 0) {
         saveWatchProgress({
           tmdb_id: tmdbId,
           content_type: contentType,
-          season,
-          episode,
+          season, episode,
           progress_seconds: v.currentTime,
           duration_seconds: v.duration,
           completed: v.currentTime / v.duration > 0.9,
@@ -206,7 +177,7 @@ const PlayerPage = () => {
       }
     }, 10000);
     return () => clearInterval(progressSaveTimer.current);
-  }, [tmdbId, contentType, season, episode, isLiveTV]);
+  }, [tmdbId, contentType, season, episode]);
 
   // Check resume on load
   useEffect(() => {
@@ -230,45 +201,29 @@ const PlayerPage = () => {
     }
   };
 
-  // HLS / Video Attach
-  const attachSource = useCallback((src: VideoSource) => {
+  // HLS / Video Attach - stabilized to prevent double loading
+  const attachedSourceRef = useRef<string | null>(null);
+  const attachSource = useCallback((src: VideoSource, force = false) => {
     const video = videoRef.current;
     if (!video) return;
+    const srcKey = src.url;
+    if (!force && attachedSourceRef.current === srcKey) return; // Already attached
+    attachedSourceRef.current = srcKey;
+
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
     setLoading(true);
     setError(false);
     setHlsLevels([]);
     setCurrentLevel(-1);
 
-    // Remove crossOrigin for mp4 and live TV to avoid CORS issues
-    if (src.type === "mp4" || isLiveTV) {
+    if (src.type === "mp4") {
       video.removeAttribute("crossorigin");
     } else {
       video.crossOrigin = "anonymous";
     }
 
     if (src.type === "m3u8" && Hls.isSupported()) {
-      const hlsConfig: Partial<Hls["config"]> = isLiveTV ? {
-        enableWorker: true,
-        lowLatencyMode: true,
-        startLevel: -1,
-        liveSyncDurationCount: 3,
-        liveMaxLatencyDurationCount: 6,
-        liveDurationInfinity: true,
-        maxBufferLength: 10,
-        maxMaxBufferLength: 30,
-        maxBufferSize: 30 * 1000 * 1000,
-        maxBufferHole: 0.5,
-        startFragPrefetch: true,
-        fragLoadingTimeOut: 15000,
-        fragLoadingMaxRetry: 10,
-        fragLoadingRetryDelay: 500,
-        manifestLoadingTimeOut: 10000,
-        manifestLoadingMaxRetry: 6,
-        levelLoadingTimeOut: 10000,
-        levelLoadingMaxRetry: 6,
-        xhrSetup: (xhr) => { xhr.withCredentials = false; },
-      } : {
+      const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: false,
         startLevel: -1,
@@ -289,8 +244,7 @@ const PlayerPage = () => {
         levelLoadingTimeOut: 15000,
         levelLoadingMaxRetry: 4,
         xhrSetup: (xhr) => { xhr.withCredentials = false; },
-      };
-      const hls = new Hls(hlsConfig as any);
+      } as any);
       hlsRef.current = hls;
       hls.loadSource(src.url);
       hls.attachMedia(video);
@@ -303,10 +257,8 @@ const PlayerPage = () => {
       hls.on(Hls.Events.ERROR, (_e, data) => {
         if (data.fatal) {
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            console.warn("[HLS] Network error, retrying...");
             hls.startLoad();
           } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            console.warn("[HLS] Media error, recovering...");
             hls.recoverMediaError();
           } else {
             setError(true);
@@ -314,7 +266,7 @@ const PlayerPage = () => {
           }
         }
       });
-      hls.on(Hls.Events.FRAG_LOADED, () => { if (loading) setLoading(false); });
+      hls.on(Hls.Events.FRAG_LOADED, () => { setLoading(false); });
     } else if (src.type === "m3u8" && video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = src.url;
       video.addEventListener("loadedmetadata", () => { setLoading(false); video.play().catch(() => {}); }, { once: true });
@@ -322,10 +274,10 @@ const PlayerPage = () => {
       video.preload = "auto";
       video.src = src.url;
       video.addEventListener("loadeddata", () => { setLoading(false); video.play().catch(() => {}); }, { once: true });
-      video.addEventListener("canplay", () => { if (loading) { setLoading(false); video.play().catch(() => {}); } }, { once: true });
+      video.addEventListener("canplay", () => { setLoading(false); video.play().catch(() => {}); }, { once: true });
     }
     video.addEventListener("error", () => { setError(true); setLoading(false); }, { once: true });
-  }, [isLiveTV]);
+  }, []);
 
   useEffect(() => {
     if (source) attachSource(source);
@@ -341,10 +293,22 @@ const PlayerPage = () => {
     const onTime = () => {
       setCurrentTime(video.currentTime);
       if (video.buffered.length > 0) setBuffered(video.buffered.end(video.buffered.length - 1));
+      
+      // Show "Next Episode" popup 10s before end
+      if (nextEpUrl && video.duration > 0) {
+        const remaining = video.duration - video.currentTime;
+        if (remaining <= 10 && remaining > 0 && !showNextEp) {
+          setShowNextEp(true);
+        }
+      }
     };
     const onDur = () => setDuration(video.duration || 0);
     const onWait = () => setLoading(true);
     const onCan = () => setLoading(false);
+    const onEnded = () => {
+      // Auto-play next episode
+      if (nextEpUrl) goNextEpisode();
+    };
 
     video.addEventListener("play", onPlay);
     video.addEventListener("pause", onPause);
@@ -352,6 +316,7 @@ const PlayerPage = () => {
     video.addEventListener("durationchange", onDur);
     video.addEventListener("waiting", onWait);
     video.addEventListener("canplay", onCan);
+    video.addEventListener("ended", onEnded);
     return () => {
       video.removeEventListener("play", onPlay);
       video.removeEventListener("pause", onPause);
@@ -359,8 +324,9 @@ const PlayerPage = () => {
       video.removeEventListener("durationchange", onDur);
       video.removeEventListener("waiting", onWait);
       video.removeEventListener("canplay", onCan);
+      video.removeEventListener("ended", onEnded);
     };
-  }, []);
+  }, [nextEpUrl, showNextEp]);
 
   // Controls visibility
   const resetControlsTimer = useCallback(() => {
@@ -393,16 +359,11 @@ const PlayerPage = () => {
   }, [playing, duration, fullscreen, resetControlsTimer]);
 
   const goBack = () => {
-    // Save progress before leaving
     const v = videoRef.current;
     if (v && tmdbId && v.currentTime > 5) {
       saveWatchProgress({
-        tmdb_id: tmdbId,
-        content_type: contentType,
-        season,
-        episode,
-        progress_seconds: v.currentTime,
-        duration_seconds: v.duration || 0,
+        tmdb_id: tmdbId, content_type: contentType, season, episode,
+        progress_seconds: v.currentTime, duration_seconds: v.duration || 0,
         completed: v.duration > 0 && v.currentTime / v.duration > 0.9,
       });
     }
@@ -418,18 +379,13 @@ const PlayerPage = () => {
     const c = containerRef.current;
     const video = videoRef.current;
     if (!c) return;
-
     if (isIOS && video) {
       try {
-        if ((video as any).webkitDisplayingFullscreen) {
-          (video as any).webkitExitFullscreen?.();
-        } else {
-          (video as any).webkitEnterFullscreen?.();
-        }
+        if ((video as any).webkitDisplayingFullscreen) (video as any).webkitExitFullscreen?.();
+        else (video as any).webkitEnterFullscreen?.();
       } catch {}
       return;
     }
-
     if (!document.fullscreenElement) c.requestFullscreen().then(() => setFullscreen(true)).catch(() => {});
     else document.exitFullscreen().then(() => setFullscreen(false)).catch(() => {});
   };
@@ -486,45 +442,33 @@ const PlayerPage = () => {
   };
 
   const goNextEpisode = () => {
-    if (nextEpUrl) {
-      const v = videoRef.current;
-      if (v && tmdbId) {
-        saveWatchProgress({
-          tmdb_id: tmdbId, content_type: contentType, season, episode,
-          progress_seconds: v.currentTime, duration_seconds: v.duration || 0, completed: true,
-        });
-      }
-      navigate(nextEpUrl, { replace: true });
+    if (!nextEpUrl) return;
+    const v = videoRef.current;
+    if (v && tmdbId) {
+      saveWatchProgress({
+        tmdb_id: tmdbId, content_type: contentType, season, episode,
+        progress_seconds: v.currentTime, duration_seconds: v.duration || 0, completed: true,
+      });
     }
+    setShowNextEp(false);
+    navigate(nextEpUrl, { replace: true });
   };
 
   // Force landscape on mobile
   useEffect(() => {
     if (isMobile) {
-      try {
-        (screen.orientation as any)?.lock?.("landscape").catch(() => {});
-      } catch {}
+      try { (screen.orientation as any)?.lock?.("landscape").catch(() => {}); } catch {}
     }
-    return () => {
-      try {
-        (screen.orientation as any)?.unlock?.();
-      } catch {}
-    };
+    return () => { try { (screen.orientation as any)?.unlock?.(); } catch {} };
   }, [isMobile]);
 
-  // Cleanup: stop video when leaving the page (fixes audio leak bug)
+  // Cleanup: stop video when leaving the page
   useEffect(() => {
     return () => {
       const v = videoRef.current;
-      if (v) {
-        v.pause();
-        v.src = "";
-        v.load();
-      }
-      if (hlsRef.current) {
-        hlsRef.current.destroy();
-        hlsRef.current = null;
-      }
+      if (v) { v.pause(); v.src = ""; v.load(); }
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
+      clearTimeout(nextEpTimerRef.current);
     };
   }, []);
 
@@ -532,31 +476,18 @@ const PlayerPage = () => {
     <div ref={containerRef} className="fixed inset-0 z-[100] bg-black group"
       onMouseMove={resetControlsTimer} onTouchStart={resetControlsTimer}
       onClick={(e) => {
-        if (isLiveTV && (tvHtml || tvIframeUrl)) return; // Don't interfere with iframe
         const target = e.target as HTMLElement;
-        if (target.closest('button') || target.closest('input') || target.closest('[data-controls]') || target.closest('iframe')) return;
+        if (target.closest('button') || target.closest('input') || target.closest('[data-controls]')) return;
         togglePlay();
       }}
       onDoubleClick={(e) => {
-        if (isLiveTV && (tvHtml || tvIframeUrl)) return;
         const target = e.target as HTMLElement;
-        if (target.closest('button') || target.closest('input') || target.closest('[data-controls]') || target.closest('iframe')) return;
+        if (target.closest('button') || target.closest('input') || target.closest('[data-controls]')) return;
         toggleFullscreen();
       }}
       style={{ cursor: showControls ? "default" : "none" }}>
       
-      {/* Live TV: srcdoc (proxied HTML) or fallback to direct iframe */}
-      {isLiveTV && (tvHtml || tvIframeUrl) ? (
-        <iframe
-          {...(tvHtml ? { srcDoc: tvHtml } : { src: tvIframeUrl! })}
-          className="w-full h-full border-0"
-          allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-          allowFullScreen
-        />
-      ) : (
-        <video ref={videoRef} className="w-full h-full object-contain" playsInline
-          preload="auto" />
-      )}
+      <video ref={videoRef} className="w-full h-full object-contain" playsInline preload="auto" />
 
       {/* Resume prompt */}
       {showResumePrompt && (
@@ -576,14 +507,39 @@ const PlayerPage = () => {
         </div>
       )}
 
-      {/* Loading - LYNEFLIX branded */}
-      {(loading || bankLoading) && !error && !(isLiveTV && (tvHtml || tvIframeUrl)) && (
+      {/* Netflix-style Next Episode popup (10s before end) */}
+      {showNextEp && nextEpUrl && (
+        <div className="absolute bottom-20 sm:bottom-24 right-4 sm:right-8 z-30 animate-fade-in">
+          <div className="bg-card/95 backdrop-blur-xl border border-white/10 rounded-2xl p-4 sm:p-5 shadow-2xl max-w-xs">
+            <p className="text-[10px] sm:text-xs text-muted-foreground mb-2 uppercase tracking-wider font-semibold">Próximo episódio</p>
+            <p className="text-sm sm:text-base font-bold text-foreground mb-3">
+              {season && episode ? `T${season} • E${episode + 1}` : "Próximo"}
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={goNextEpisode}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all"
+              >
+                <Play className="w-4 h-4 fill-current" />
+                Reproduzir
+              </button>
+              <button
+                onClick={() => setShowNextEp(false)}
+                className="px-3 py-2.5 rounded-xl bg-white/10 text-sm font-medium hover:bg-white/20 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Loading */}
+      {(loading || bankLoading) && !error && sources.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center z-10 bg-black">
           <div className="flex flex-col items-center gap-6">
             <div className="lyneflix-loader">
-              <span className="lyneflix-text text-4xl sm:text-5xl font-black tracking-wider select-none">
-                LYNEFLIX
-              </span>
+              <span className="lyneflix-text text-4xl sm:text-5xl font-black tracking-wider select-none">LYNEFLIX</span>
             </div>
             <div className="flex gap-1.5">
               <div className="w-2 h-2 rounded-full bg-primary animate-bounce" style={{ animationDelay: "0ms" }} />
@@ -594,8 +550,15 @@ const PlayerPage = () => {
         </div>
       )}
 
-      {/* Error - Friendly modal */}
-      {(error || (!bankLoading && !loading && sources.length === 0 && !(isLiveTV && (tvHtml || tvIframeUrl)))) && (
+      {/* Buffering spinner (when video is loaded but buffering) */}
+      {loading && !error && sources.length > 0 && (
+        <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
+          <div className="w-12 h-12 border-3 border-primary border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
+
+      {/* Error */}
+      {(error || (!bankLoading && !loading && sources.length === 0)) && (
         <div className="absolute inset-0 flex items-center justify-center bg-black z-20">
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-[0.03]">
             <span className="text-[100px] sm:text-[140px] font-black tracking-wider text-white select-none">LYNEFLIX</span>
@@ -606,7 +569,7 @@ const PlayerPage = () => {
             </div>
             <h3 className="text-lg font-bold text-white mb-2">Ops! Tivemos um probleminha</h3>
             <p className="text-sm text-white/50 mb-6 leading-relaxed">
-              Nossa equipe está mexendo na infraestrutura. Clique abaixo para avisar e daremos prioridade máxima!
+              Nossa equipe está mexendo na infraestrutura. Clique abaixo para avisar!
             </p>
             <div className="flex flex-col gap-3">
               <button
@@ -621,7 +584,7 @@ const PlayerPage = () => {
               </button>
               <div className="flex gap-2">
                 {error && source && (
-                  <button onClick={() => attachSource(source)} className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/10 text-white text-sm font-medium hover:bg-white/20 transition-colors">
+                  <button onClick={() => attachSource(source, true)} className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/10 text-white text-sm font-medium hover:bg-white/20 transition-colors">
                     <RefreshCw className="w-4 h-4" /> Tentar de novo
                   </button>
                 )}
@@ -643,20 +606,7 @@ const PlayerPage = () => {
         </div>
       )}
 
-      {/* Controls - hide full controls for live TV iframe, show only back button */}
-      {isLiveTV && (tvHtml || tvIframeUrl) ? (
-        <div className="absolute top-0 left-0 right-0 z-20 p-3 sm:p-4 pointer-events-none">
-          <div className="flex items-center gap-3 pointer-events-auto w-fit">
-            <button onClick={goBack} className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-black/60 backdrop-blur-sm flex items-center justify-center hover:bg-black/80 transition-colors">
-              <ArrowLeft className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
-            </button>
-            <div className="bg-black/60 backdrop-blur-sm rounded-xl px-3 py-1.5 flex items-center gap-2">
-              <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span></span>
-              <span className="text-white text-xs sm:text-sm font-semibold">{bankTitle}</span>
-            </div>
-          </div>
-        </div>
-      ) : (
+      {/* Controls */}
       <div data-controls className={`absolute inset-0 z-10 transition-opacity duration-500 ${showControls ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
         {/* Top */}
         <div className="absolute top-0 left-0 right-0 h-24 sm:h-28 bg-gradient-to-b from-black/80 via-black/40 to-transparent">
@@ -666,8 +616,8 @@ const PlayerPage = () => {
                 <ArrowLeft className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
               </button>
               <div className="min-w-0">
-                <h2 className="text-white text-sm sm:text-base lg:text-xl font-bold truncate drop-shadow-lg">{title}</h2>
-                {subtitle && <p className="text-white/50 text-[10px] sm:text-xs lg:text-sm truncate">{subtitle}</p>}
+                <h2 className="text-white text-sm sm:text-base lg:text-xl font-bold truncate drop-shadow-lg">{bankTitle}</h2>
+                {season && episode && <p className="text-white/50 text-[10px] sm:text-xs lg:text-sm truncate">T{season} • E{episode}</p>}
               </div>
             </div>
           </div>
@@ -713,19 +663,12 @@ const PlayerPage = () => {
                 </div>
               )}
               <span className="text-white/60 text-[10px] sm:text-xs lg:text-sm ml-1 sm:ml-2 font-mono tabular-nums select-none">
-                {isLiveTV ? (
-                  <span className="flex items-center gap-1.5">
-                    <span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span></span>
-                    <span className="text-red-400 font-semibold">AO VIVO</span>
-                  </span>
-                ) : (
-                  <>{formatTime(currentTime)} <span className="text-white/30">/</span> {formatTime(duration)}</>
-                )}
+                {formatTime(currentTime)} <span className="text-white/30">/</span> {formatTime(duration)}
               </span>
             </div>
 
             <div className="flex items-center gap-0.5 sm:gap-1">
-              {/* Next episode button */}
+              {/* Next episode button in controls */}
               {nextEpUrl && (
                 <button onClick={goNextEpisode} className="flex items-center gap-1 px-2 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-white/10 hover:bg-white/20 transition-colors text-[10px] sm:text-xs font-medium text-white">
                   <SkipForward className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
@@ -799,7 +742,6 @@ const PlayerPage = () => {
           </div>
         </div>
       </div>
-      )}
     </div>
   );
 };
