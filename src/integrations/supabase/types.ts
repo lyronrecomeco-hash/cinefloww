@@ -415,6 +415,11 @@ export type Database = {
           telegram_unique_id: string
           telegram_user_id: number
           title: string
+          tmdb_backdrop: string | null
+          tmdb_id: number | null
+          tmdb_poster: string | null
+          tmdb_rating: number | null
+          tmdb_year: string | null
           updated_at: string
         }
         Insert: {
@@ -435,6 +440,11 @@ export type Database = {
           telegram_unique_id: string
           telegram_user_id: number
           title: string
+          tmdb_backdrop?: string | null
+          tmdb_id?: number | null
+          tmdb_poster?: string | null
+          tmdb_rating?: number | null
+          tmdb_year?: string | null
           updated_at?: string
         }
         Update: {
@@ -455,6 +465,11 @@ export type Database = {
           telegram_unique_id?: string
           telegram_user_id?: number
           title?: string
+          tmdb_backdrop?: string | null
+          tmdb_id?: number | null
+          tmdb_poster?: string | null
+          tmdb_rating?: number | null
+          tmdb_year?: string | null
           updated_at?: string
         }
         Relationships: []
