@@ -584,6 +584,11 @@ async function handleCallback(chatId: number, userId: number, callbackData: stri
       mime_type: d.mime_type,
       status: "pending",
       telegram_user_id: userId,
+      tmdb_id: d.tmdb_id || null,
+      tmdb_poster: d.tmdb_poster || null,
+      tmdb_backdrop: d.tmdb_backdrop || null,
+      tmdb_year: d.tmdb_year || null,
+      tmdb_rating: d.tmdb_rating ? parseFloat(d.tmdb_rating) : null,
     });
 
     // Clean up messages

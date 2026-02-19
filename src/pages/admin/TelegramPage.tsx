@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { Bot, Search, RefreshCw, Film, Tv, Trash2, Check, Clock, Package, ChevronLeft, ChevronRight, Settings, Wifi, WifiOff } from "lucide-react";
+import { Bot, Search, RefreshCw, Film, Tv, Trash2, Check, Clock, Package, ChevronLeft, ChevronRight, Settings, Wifi, WifiOff, X, Play, ExternalLink } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { posterUrl } from "@/services/tmdb";
 
 interface Ingestion {
   id: string;
@@ -21,6 +23,11 @@ interface Ingestion {
   status: string;
   telegram_user_id: number;
   created_at: string;
+  tmdb_id: number | null;
+  tmdb_poster: string | null;
+  tmdb_backdrop: string | null;
+  tmdb_year: string | null;
+  tmdb_rating: number | null;
 }
 
 const ITEMS_PER_PAGE = 20;
@@ -29,6 +36,8 @@ const STATUS_MAP: Record<string, { label: string; color: string; icon: any }> = 
   confirmed: { label: "Confirmado", color: "text-blue-400", icon: Check },
   processed: { label: "Processado", color: "text-green-400", icon: Package },
 };
+
+const IMG_BASE = "https://image.tmdb.org/t/p";
 
 const TelegramPage = () => {
   const [items, setItems] = useState<Ingestion[]>([]);
@@ -42,18 +51,18 @@ const TelegramPage = () => {
   const [authorizedId, setAuthorizedId] = useState("");
   const [authorizedIds, setAuthorizedIds] = useState<number[]>([]);
   const [stats, setStats] = useState({ pending: 0, confirmed: 0, processed: 0 });
+  const [selectedItem, setSelectedItem] = useState<Ingestion | null>(null);
+  const [playerUrl, setPlayerUrl] = useState<string | null>(null);
+  const [extracting, setExtracting] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
-
-    // Count
     let countQ = supabase.from("telegram_ingestions").select("id", { count: "exact", head: true });
     if (statusFilter !== "all") countQ = countQ.eq("status", statusFilter);
     if (filter) countQ = countQ.ilike("title", `%${filter}%`);
     const { count } = await countQ;
     setTotalCount(count || 0);
 
-    // Fetch
     const from = (page - 1) * ITEMS_PER_PAGE;
     let q = supabase.from("telegram_ingestions").select("*").order("created_at", { ascending: false }).range(from, from + ITEMS_PER_PAGE - 1);
     if (statusFilter !== "all") q = q.eq("status", statusFilter);
@@ -61,14 +70,12 @@ const TelegramPage = () => {
     const { data } = await q;
     setItems((data as Ingestion[]) || []);
 
-    // Stats
     const [{ count: p }, { count: c }, { count: pr }] = await Promise.all([
       supabase.from("telegram_ingestions").select("id", { count: "exact", head: true }).eq("status", "pending"),
       supabase.from("telegram_ingestions").select("id", { count: "exact", head: true }).eq("status", "confirmed"),
       supabase.from("telegram_ingestions").select("id", { count: "exact", head: true }).eq("status", "processed"),
     ]);
     setStats({ pending: p || 0, confirmed: c || 0, processed: pr || 0 });
-
     setLoading(false);
   }, [page, statusFilter, filter]);
 
@@ -83,18 +90,12 @@ const TelegramPage = () => {
     }
   }, []);
 
-  useEffect(() => {
-    fetchData();
-    fetchAuthorizedIds();
-  }, [fetchData, fetchAuthorizedIds]);
+  useEffect(() => { fetchData(); fetchAuthorizedIds(); }, [fetchData, fetchAuthorizedIds]);
 
-  // Realtime
   useEffect(() => {
     const channel = supabase
       .channel("telegram_ingestions_realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "telegram_ingestions" }, () => {
-        fetchData();
-      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "telegram_ingestions" }, () => fetchData())
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [fetchData]);
@@ -149,6 +150,47 @@ const TelegramPage = () => {
     toast({ title: "Item removido." });
   };
 
+  const testPlayer = async (item: Ingestion) => {
+    if (!item.tmdb_id) {
+      toast({ title: "Sem TMDB ID", description: "Não é possível testar sem dados do TMDB.", variant: "destructive" });
+      return;
+    }
+    setSelectedItem(item);
+    setExtracting(true);
+    setPlayerUrl(null);
+    try {
+      // Try cache first
+      const { data: cached } = await supabase
+        .from("video_cache")
+        .select("video_url, video_type")
+        .eq("tmdb_id", item.tmdb_id)
+        .eq("content_type", item.content_type === "series" ? "tv" : "movie")
+        .gt("expires_at", new Date().toISOString())
+        .limit(1)
+        .maybeSingle();
+
+      if (cached?.video_url) {
+        setPlayerUrl(`/player/${item.content_type === "series" ? "tv" : "movie"}/${item.tmdb_id}?title=${encodeURIComponent(item.title)}&url=${encodeURIComponent(cached.video_url)}&type=${cached.video_type || "m3u8"}${item.season ? `&s=${item.season}&e=${item.episode}` : ""}`);
+      } else {
+        // Extract
+        const { data: extracted } = await supabase.functions.invoke("extract-video", {
+          body: {
+            tmdb_id: item.tmdb_id,
+            content_type: item.content_type === "series" ? "tv" : "movie",
+            season: item.season,
+            episode: item.episode,
+          },
+        });
+        if (extracted?.url) {
+          setPlayerUrl(`/player/${item.content_type === "series" ? "tv" : "movie"}/${item.tmdb_id}?title=${encodeURIComponent(item.title)}&url=${encodeURIComponent(extracted.url)}&type=${extracted.type || "m3u8"}${item.season ? `&s=${item.season}&e=${item.episode}` : ""}`);
+        }
+      }
+    } catch (e) {
+      toast({ title: "Erro ao extrair vídeo", variant: "destructive" });
+    }
+    setExtracting(false);
+  };
+
   const totalPages = Math.ceil(totalCount / ITEMS_PER_PAGE);
 
   const formatSize = (bytes: number | null) => {
@@ -159,7 +201,10 @@ const TelegramPage = () => {
 
   const formatDuration = (secs: number | null) => {
     if (!secs) return "N/A";
-    return `${Math.floor(secs / 60)}min`;
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    if (h > 0) return `${h}h${m.toString().padStart(2, "0")}min`;
+    return `${m}min`;
   };
 
   return (
@@ -172,15 +217,12 @@ const TelegramPage = () => {
           </div>
           <div>
             <h1 className="text-xl font-bold">Bot Telegram</h1>
-            <p className="text-xs text-muted-foreground">Ingestão de mídia via Telegram</p>
+            <p className="text-xs text-muted-foreground">Ingestão de mídia via Telegram + TMDB</p>
           </div>
         </div>
         <div className="flex gap-2">
-          <button
-            onClick={setupWebhook}
-            disabled={settingUp}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary/20 border border-primary/30 text-primary text-sm hover:bg-primary/30"
-          >
+          <button onClick={setupWebhook} disabled={settingUp}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-primary/20 border border-primary/30 text-primary text-sm hover:bg-primary/30">
             {settingUp ? <RefreshCw className="w-4 h-4 animate-spin" /> : webhookActive ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
             {webhookActive ? "Webhook Ativo" : "Ativar Webhook"}
           </button>
@@ -214,12 +256,9 @@ const TelegramPage = () => {
           <span className="text-sm font-medium">IDs Autorizados (Telegram)</span>
         </div>
         <div className="flex gap-2 mb-2">
-          <input
-            value={authorizedId}
-            onChange={e => setAuthorizedId(e.target.value)}
+          <input value={authorizedId} onChange={e => setAuthorizedId(e.target.value)}
             placeholder="ID do Telegram..."
-            className="flex-1 h-9 px-3 rounded-lg bg-background border border-border text-sm focus:outline-none focus:border-primary/50"
-          />
+            className="flex-1 h-9 px-3 rounded-lg bg-background border border-border text-sm focus:outline-none focus:border-primary/50" />
           <button onClick={addAuthorizedId} className="px-4 h-9 rounded-lg bg-primary text-primary-foreground text-sm">Adicionar</button>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -229,7 +268,7 @@ const TelegramPage = () => {
               <button onClick={() => removeAuthorizedId(id)} className="text-destructive hover:text-destructive/80">×</button>
             </span>
           ))}
-          {authorizedIds.length === 0 && <span className="text-xs text-muted-foreground">Nenhum ID autorizado. Adicione seu ID do Telegram.</span>}
+          {authorizedIds.length === 0 && <span className="text-xs text-muted-foreground">Nenhum ID autorizado.</span>}
         </div>
       </div>
 
@@ -237,21 +276,15 @@ const TelegramPage = () => {
       <div className="flex gap-2">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <input
-            value={filter}
-            onChange={e => { setFilter(e.target.value); setPage(1); }}
+          <input value={filter} onChange={e => { setFilter(e.target.value); setPage(1); }}
             placeholder="Buscar..."
-            className="w-full h-10 pl-9 pr-4 rounded-xl bg-muted/30 border border-border text-sm focus:outline-none focus:border-primary/50"
-          />
+            className="w-full h-10 pl-9 pr-4 rounded-xl bg-muted/30 border border-border text-sm focus:outline-none focus:border-primary/50" />
         </div>
         {["all", "pending", "confirmed", "processed"].map(s => (
-          <button
-            key={s}
-            onClick={() => { setStatusFilter(s); setPage(1); }}
+          <button key={s} onClick={() => { setStatusFilter(s); setPage(1); }}
             className={`px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${
               statusFilter === s ? "bg-primary/20 border-primary/30 text-primary" : "bg-muted/30 border-border text-muted-foreground hover:bg-muted/50"
-            }`}
-          >
+            }`}>
             {s === "all" ? "Todos" : STATUS_MAP[s]?.label || s}
           </button>
         ))}
@@ -267,35 +300,53 @@ const TelegramPage = () => {
           {items.map(item => {
             const st = STATUS_MAP[item.status] || STATUS_MAP.pending;
             const StIcon = st.icon;
+            const hasPoster = !!item.tmdb_poster;
             return (
-              <div key={item.id} className="p-4 rounded-xl bg-muted/10 border border-border">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
+              <div key={item.id}
+                className="p-3 rounded-xl bg-muted/10 border border-border hover:border-primary/30 transition-colors cursor-pointer"
+                onClick={() => { setSelectedItem(item); setPlayerUrl(null); }}>
+                <div className="flex items-start gap-3">
+                  {/* Poster */}
+                  <div className="w-14 h-20 rounded-lg overflow-hidden bg-muted/30 flex-shrink-0">
+                    {hasPoster ? (
+                      <img src={`${IMG_BASE}/w92${item.tmdb_poster}`} alt={item.title}
+                        className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        {item.content_type === "movie" ? <Film className="w-5 h-5 text-muted-foreground" /> : <Tv className="w-5 h-5 text-muted-foreground" />}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Info */}
+                  <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
-                      {item.content_type === "movie" ? <Film className="w-4 h-4 text-primary" /> : <Tv className="w-4 h-4 text-primary" />}
-                      <span className="font-medium text-sm">{item.title}</span>
+                      <span className="font-medium text-sm truncate">{item.title}</span>
+                      {item.tmdb_year && <span className="text-xs text-muted-foreground">({item.tmdb_year})</span>}
                       <span className={`flex items-center gap-1 text-xs ${st.color}`}>
                         <StIcon className="w-3 h-3" /> {st.label}
                       </span>
                     </div>
-                    {item.synopsis && <p className="text-xs text-muted-foreground mb-2 line-clamp-2">{item.synopsis}</p>}
-                    <div className="flex flex-wrap gap-2 text-[10px]">
+                    {item.synopsis && <p className="text-xs text-muted-foreground mb-1.5 line-clamp-1">{item.synopsis}</p>}
+                    <div className="flex flex-wrap gap-1.5 text-[10px]">
                       {item.season != null && <span className="px-2 py-0.5 rounded bg-muted">T{item.season}E{item.episode}</span>}
                       <span className="px-2 py-0.5 rounded bg-muted">{formatSize(item.file_size)}</span>
                       <span className="px-2 py-0.5 rounded bg-muted">{formatDuration(item.duration)}</span>
                       {item.resolution && <span className="px-2 py-0.5 rounded bg-muted">{item.resolution}</span>}
-                      <span className="px-2 py-0.5 rounded bg-muted font-mono">{item.id.slice(0, 8)}</span>
+                      {item.tmdb_rating && <span className="px-2 py-0.5 rounded bg-primary/20 text-primary">⭐ {Number(item.tmdb_rating).toFixed(1)}</span>}
                       <span className="px-2 py-0.5 rounded bg-muted">{new Date(item.created_at).toLocaleDateString("pt-BR")}</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 ml-3">
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-1 flex-shrink-0" onClick={e => e.stopPropagation()}>
                     {item.status === "pending" && (
                       <button onClick={() => updateStatus(item.id, "confirmed")} className="p-2 rounded-lg hover:bg-muted text-blue-400" title="Confirmar">
                         <Check className="w-4 h-4" />
                       </button>
                     )}
                     {item.status === "confirmed" && (
-                      <button onClick={() => updateStatus(item.id, "processed")} className="p-2 rounded-lg hover:bg-muted text-green-400" title="Marcar processado">
+                      <button onClick={() => updateStatus(item.id, "processed")} className="p-2 rounded-lg hover:bg-muted text-green-400" title="Processado">
                         <Package className="w-4 h-4" />
                       </button>
                     )}
@@ -323,6 +374,67 @@ const TelegramPage = () => {
           </button>
         </div>
       )}
+
+      {/* Detail Modal */}
+      <Dialog open={!!selectedItem} onOpenChange={() => setSelectedItem(null)}>
+        <DialogContent className="max-w-lg bg-card border-border">
+          {selectedItem && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  {selectedItem.content_type === "movie" ? <Film className="w-5 h-5 text-primary" /> : <Tv className="w-5 h-5 text-primary" />}
+                  {selectedItem.title}
+                  {selectedItem.tmdb_year && <span className="text-sm text-muted-foreground font-normal">({selectedItem.tmdb_year})</span>}
+                </DialogTitle>
+              </DialogHeader>
+
+              <div className="space-y-4">
+                {/* Poster + details */}
+                <div className="flex gap-4">
+                  {selectedItem.tmdb_poster && (
+                    <img src={`${IMG_BASE}/w200${selectedItem.tmdb_poster}`} alt={selectedItem.title}
+                      className="w-28 h-auto rounded-lg" />
+                  )}
+                  <div className="flex-1 space-y-2 text-sm">
+                    {selectedItem.synopsis && <p className="text-muted-foreground text-xs">{selectedItem.synopsis}</p>}
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div><span className="text-muted-foreground">Tipo:</span> {selectedItem.content_type === "movie" ? "Filme" : "Série"}</div>
+                      {selectedItem.season != null && <div><span className="text-muted-foreground">Temporada:</span> {selectedItem.season}</div>}
+                      {selectedItem.episode != null && <div><span className="text-muted-foreground">Episódio:</span> {selectedItem.episode}</div>}
+                      <div><span className="text-muted-foreground">Tamanho:</span> {formatSize(selectedItem.file_size)}</div>
+                      <div><span className="text-muted-foreground">Duração:</span> {formatDuration(selectedItem.duration)}</div>
+                      {selectedItem.resolution && <div><span className="text-muted-foreground">Resolução:</span> {selectedItem.resolution}</div>}
+                      {selectedItem.tmdb_rating && <div><span className="text-muted-foreground">Nota:</span> ⭐ {Number(selectedItem.tmdb_rating).toFixed(1)}</div>}
+                      {selectedItem.tmdb_id && <div><span className="text-muted-foreground">TMDB:</span> {selectedItem.tmdb_id}</div>}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground font-mono">{selectedItem.id}</div>
+                  </div>
+                </div>
+
+                {/* Player test */}
+                <div className="border-t border-border pt-3">
+                  {playerUrl ? (
+                    <div className="space-y-2">
+                      <a href={playerUrl} target="_blank" rel="noopener noreferrer"
+                        className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 w-full justify-center">
+                        <Play className="w-4 h-4" /> Abrir no Player Nativo
+                        <ExternalLink className="w-3 h-3 ml-1" />
+                      </a>
+                    </div>
+                  ) : (
+                    <button onClick={() => testPlayer(selectedItem)} disabled={extracting || !selectedItem.tmdb_id}
+                      className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary/20 border border-primary/30 text-primary text-sm font-medium hover:bg-primary/30 w-full justify-center disabled:opacity-50">
+                      {extracting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                      {extracting ? "Extraindo vídeo..." : "Testar Player"}
+                    </button>
+                  )}
+                  {!selectedItem.tmdb_id && <p className="text-xs text-muted-foreground text-center mt-1">Sem dados TMDB — player indisponível</p>}
+                </div>
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
